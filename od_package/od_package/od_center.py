@@ -95,6 +95,16 @@ class ObjectDetectionNode(Node):
             self.visualize_with_opencv(self.color_frame, None, None, None, None, None)
 
     def visualize_with_opencv(self, frame, box, score, camera_x, camera_y, camera_z):
+
+        R = np.array([
+            [1, 0, 0],  # X는 동일
+            [0, 0, 1],  # Z -> Y
+            [0, -1, 0]  # Y -> -Z
+        ])
+
+        camera_coords = np.array([camera_x, camera_y, camera_z])
+        camera_coords = R @ camera_coords
+
         if box is not None:
             label_text = f"cell_phone {score:.2f}"
             coords_text = f"X={camera_x:.2f}, Y={camera_y:.2f}, Z={camera_z:.2f}"
