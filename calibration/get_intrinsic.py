@@ -5,7 +5,7 @@ import argparse
 
 parser = argparse.ArgumentParser()
 
-parser.add_argument("--num", type=int)
+parser.add_argument("--num", type=int, default=0, help="Cam device number is required.", required=True)
 
 args = parser.parse_args()
 
