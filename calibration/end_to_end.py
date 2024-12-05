@@ -145,7 +145,7 @@ def main():
     hand_eye_calibration = HandEyeCalibration(tf_calculator)
 
     try:
-        for _ in range(5):
+        for _ in range(10):
             hand_eye_calibration.capture_pose()
         T_eff_to_cam = hand_eye_calibration.calibrate_hand_eye()
     except KeyboardInterrupt:
