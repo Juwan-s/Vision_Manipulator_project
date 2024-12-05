@@ -106,14 +106,23 @@ class HandEyeCalibration(Node):
                 ret, corners = cv2.findChessboardCorners(gray, (7, 9), None)
                 if ret:
                     cv2.drawChessboardCorners(frame, (7, 9), corners, ret)
-                    _, rvec, tvec = cv2.solvePnP(object_points, corners, camera_matrix, dist_coeffs)
-                    rotation_matrix, _ = cv2.Rodrigues(rvec)
-                    T_cam_to_marker = np.eye(4)
-                    T_cam_to_marker[:3, :3] = rotation_matrix
-                    T_cam_to_marker[:3, 3] = tvec.flatten()
-                    cap.release()
-                    cv2.destroyAllWindows()
-                    return True, T_cam_to_marker
+                    success, rvec, tvec = cv2.solvePnP(object_points, corners, camera_matrix, dist_coeffs)
+                    
+                    if success:
+                    
+                        rotation_matrix, _ = cv2.Rodrigues(rvec)
+                        T_cam_to_marker = np.eye(4)
+                        T_cam_to_marker[:3, :3] = rotation_matrix
+                        T_cam_to_marker[:3, 3] = tvec.flatten()
+                        
+                        cv2.imshow("Detected Chessboard", frame)
+                        cap.release()
+                        cv2.destroyAllWindows()
+                        return True, T_cam_to_marker
+                    else:
+                        print("solvePnP Failed")
+                        raise KeyboardInterrupt
+                
 
         cap.release()
         cv2.destroyAllWindows()
