@@ -116,6 +116,8 @@ class HandEyeCalibration(Node):
                         T_cam_to_marker[:3, 3] = tvec.flatten()
                         
                         cv2.imshow("Detected Chessboard", frame)
+                        cv2.waitKey(0)  # 사용자 확인 후 아무 키나 눌러 닫기
+                        
                         cap.release()
                         cv2.destroyAllWindows()
                         return True, T_cam_to_marker
