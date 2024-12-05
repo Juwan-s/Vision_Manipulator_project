@@ -51,9 +51,9 @@ class TFChainCalculator(Node):
         transform_matrix = np.eye(4)
         for parent, child, transform in reversed(chain):
             translation = [
-                transform.translation.x,
-                transform.translation.y,
-                transform.translation.z
+                transform.translation.x * 1000,
+                transform.translation.y * 1000,
+                transform.translation.z * 1000
             ]
             quaternion = [
                 transform.rotation.x,
@@ -159,7 +159,6 @@ def main(args=None):
     try:
         print("spinnig detection node")
         while rclpy.ok():
-            #rclpy.spin_once(detection_node)
             print("detecting start")
             detection_node.detect_and_transform()
     except KeyboardInterrupt:
