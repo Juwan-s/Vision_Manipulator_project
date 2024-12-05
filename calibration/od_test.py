@@ -115,6 +115,9 @@ class ObjectDetectionNode(Node):
         camera_coords_h = np.append(camera_coords, 1.0)  # Homogeneous coordinates
 
         # ??? -> End-Effector ??
+        
+        print(self.T_eff_to_cam.shape)
+        print(camera_coords_h.shape)
         eff_coords = np.linalg.inv(self.T_eff_to_cam) @ camera_coords_h
 
         # End-Effector -> Base ??
