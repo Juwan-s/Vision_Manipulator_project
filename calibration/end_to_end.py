@@ -105,6 +105,7 @@ class HandEyeCalibration(Node):
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 ret, corners = cv2.findChessboardCorners(gray, (7, 9), None)
                 if ret:
+                    cv2.drawChessboardCorners(frame, (7, 9), corners, ret)
                     _, rvec, tvec = cv2.solvePnP(object_points, corners, camera_matrix, dist_coeffs)
                     rotation_matrix, _ = cv2.Rodrigues(rvec)
                     T_cam_to_marker = np.eye(4)
