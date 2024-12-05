@@ -116,8 +116,7 @@ class ObjectDetectionNode(Node):
 
         # ??? -> End-Effector ??
         
-        print(self.T_eff_to_cam.shape)
-        print(camera_coords_h.shape)
+        
         eff_coords = np.linalg.inv(self.T_eff_to_cam) @ camera_coords_h
 
         # End-Effector -> Base ??
@@ -154,7 +153,8 @@ def main(args=None):
     T_eff_to_cam = np.array([
         [9.16869125e-01, 3.98615102e-01, 2.13777375e-02, 9.05965902e+01],
         [-3.82071021e-01, 8.60781334e-01, 3.36269579e-01, -5.37479709e+01],
-        [1.15640575e-01, -3.16483009e-01, 9.41523108e-01, 1.04760329e+02]
+        [1.15640575e-01, -3.16483009e-01, 9.41523108e-01, 1.04760329e+02],
+        [0.0, 0.0, 0.0, 1.0]
         ])
 
     # Object Detection Node ??
