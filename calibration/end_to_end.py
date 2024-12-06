@@ -3,78 +3,74 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from scipy.spatial.transform import Rotation as R
-from tf2_msgs.msg import TFMessage
+from std_msgs.msg import Float32MultiArray
 
-class TFChainCalculator(Node):
+
+class PositionRotationCalculator(Node):
     def __init__(self):
-        super().__init__('tf_chain_calculator')
-        self.subscriber = self.create_subscription(
-            TFMessage,
-            '/tf',
-            self.tf_callback,
+        super().__init__('position_rotation_calculator')
+
+        # Subscribe to position and rotation topics
+        self.create_subscription(
+            Float32MultiArray,  # 메시지 타입
+            '/dsr01/msg/current_posx',  # 위치 및 자세 토픽
+            self.position_rotation_callback,  # 콜백 함수
             10
         )
-        self.transforms = {}  # 저장된 변환 데이터
-        self.target_frame = 'link_6'
-        self.base_frame = 'base_link'
 
-    def tf_callback(self, msg):
-        for transform in msg.transforms:
-            parent_frame = transform.header.frame_id
-            child_frame = transform.child_frame_id
-            self.transforms[(parent_frame, child_frame)] = transform.transform
-        self.get_transform_matrix(self.base_frame, self.target_frame)
+        self.transformation_matrix = None
 
-    def get_transform_matrix(self, base_frame, target_frame):
-        current_frame = target_frame
-        chain = []
+    def position_rotation_callback(self, msg):
+        # Extract data from message
+        x, y, z, rx, ry, rz = msg.data
 
-        while current_frame != base_frame:
-            for (parent, child), transform in self.transforms.items():
-                if child == current_frame:
-                    chain.append((parent, child, transform))
-                    current_frame = parent
-                    break
-            else:
-                self.get_logger().error(f"No parent frame found for {current_frame}")
-                return
+        # Calculate rotation matrix from ZYZ Euler angles
+        R_matrix = self.euler_to_rotation_matrix(rx, ry, rz)
 
-        transform_matrix = np.eye(4)
-        for parent, child, transform in reversed(chain):
-            translation = [
-                transform.translation.x * 1000,
-                transform.translation.y * 1000,
-                transform.translation.z * 1000
-            ]
-            quaternion = [
-                transform.rotation.x,
-                transform.rotation.y,
-                transform.rotation.z,
-                transform.rotation.w
-            ]
-            rotation_matrix = R.from_quat(quaternion).as_matrix()
-            T = np.eye(4)
-            T[:3, :3] = rotation_matrix
-            T[:3, 3] = translation
-            transform_matrix = transform_matrix @ T
-            
-        return transform_matrix
+        # Construct transformation matrix
+        self.transformation_matrix = np.eye(4)
+        self.transformation_matrix[:3, :3] = R_matrix
+        self.transformation_matrix[:3, 3] = [x, y, z]
+
+        self.get_logger().info(f"Transformation Matrix (Base -> End Effector):\n{self.transformation_matrix}")
+
+    def euler_to_rotation_matrix(self, rx, ry, rz):
+        # Convert ZYZ Euler Angles (degrees) to Rotation Matrix
+        rx, ry, rz = np.deg2rad([rx, ry, rz])  # Convert to radians
+        Rz1 = np.array([
+            [np.cos(rz), -np.sin(rz), 0],
+            [np.sin(rz),  np.cos(rz), 0],
+            [0, 0, 1]
+        ])
+        Ry = np.array([
+            [np.cos(ry), 0, np.sin(ry)],
+            [0, 1, 0],
+            [-np.sin(ry), 0, np.cos(ry)]
+        ])
+        Rz2 = np.array([
+            [np.cos(rx), -np.sin(rx), 0],
+            [np.sin(rx),  np.cos(rx), 0],
+            [0, 0, 1]
+        ])
+        return Rz1 @ Ry @ Rz2
+
 
 class HandEyeCalibration(Node):
-    def __init__(self, tf_calculator):
+    def __init__(self, position_rotation_calculator):
         super().__init__('hand_eye_calibration')
-        self.tf_calculator = tf_calculator
+        self.position_rotation_calculator = position_rotation_calculator
         self.A_matrices = []
         self.B_matrices = []
 
     def capture_pose(self):
-        rclpy.spin_once(self.tf_calculator)
-        T_base_to_eff = self.tf_calculator.get_transform_matrix('base_link', 'link_6')
-        self.A_matrices.append(T_base_to_eff)
-        success, T_cam_to_marker = self.solve_pnp()
-        if success:
-            self.B_matrices.append(T_cam_to_marker)
-            self.get_logger().info(f"Captured Pose {len(self.A_matrices)}: Success")
+        rclpy.spin_once(self.position_rotation_calculator)
+        T_base_to_eff = self.position_rotation_calculator.transformation_matrix
+        if T_base_to_eff is not None:
+            self.A_matrices.append(T_base_to_eff)
+            success, T_cam_to_marker = self.solve_pnp()
+            if success:
+                self.B_matrices.append(T_cam_to_marker)
+                self.get_logger().info(f"Captured Pose {len(self.A_matrices)}: Success")
 
     def solve_pnp(self):
         object_points = np.zeros((7 * 9, 3), dtype=np.float32)
@@ -109,7 +105,6 @@ class HandEyeCalibration(Node):
                     success, rvec, tvec = cv2.solvePnP(object_points, corners, camera_matrix, dist_coeffs)
                     
                     if success:
-                    
                         rotation_matrix, _ = cv2.Rodrigues(rvec)
                         T_cam_to_marker = np.eye(4)
                         T_cam_to_marker[:3, :3] = rotation_matrix
@@ -122,9 +117,8 @@ class HandEyeCalibration(Node):
                         cv2.destroyAllWindows()
                         return True, T_cam_to_marker
                     else:
-                        print("solvePnP Failed")
-                        raise KeyboardInterrupt
-                
+                        self.get_logger().error("solvePnP failed.")
+                        break
 
         cap.release()
         cv2.destroyAllWindows()
@@ -151,10 +145,11 @@ class HandEyeCalibration(Node):
         self.get_logger().info(f"End-Effector → Camera Transform:\n{T_eff_to_cam}")
         return T_eff_to_cam
 
+
 def main():
     rclpy.init()
-    tf_calculator = TFChainCalculator()
-    hand_eye_calibration = HandEyeCalibration(tf_calculator)
+    position_rotation_calculator = PositionRotationCalculator()
+    hand_eye_calibration = HandEyeCalibration(position_rotation_calculator)
 
     try:
         for _ in range(10):
@@ -163,9 +158,10 @@ def main():
     except KeyboardInterrupt:
         pass
 
-    tf_calculator.destroy_node()
+    position_rotation_calculator.destroy_node()
     hand_eye_calibration.destroy_node()
     rclpy.shutdown()
+
 
 if __name__ == '__main__':
     main()

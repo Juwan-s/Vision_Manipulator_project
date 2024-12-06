@@ -51,9 +51,9 @@ class TFChainCalculator(Node):
         for parent, child, transform in reversed(chain):
             # Translation (이동)
             translation = [
-                transform.translation.x,
-                transform.translation.y,
-                transform.translation.z
+                transform.translation.x * 1000,
+                transform.translation.y * 1000,
+                transform.translation.z * 1000
             ]
 
             # Rotation (쿼터니언)
