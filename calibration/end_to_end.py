@@ -3,7 +3,8 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from scipy.spatial.transform import Rotation as R
-from std_msgs.msg import Float32MultiArray
+from std_msgs.msg import Float32MultiArray, Float64MultiArray
+import tf_transformations
 
 
 class PositionRotationCalculator(Node):
@@ -12,7 +13,7 @@ class PositionRotationCalculator(Node):
 
         # Subscribe to position and rotation topics
         self.create_subscription(
-            Float32MultiArray,  # 메시지 타입
+            Float64MultiArray,  # 메시지 타입
             '/dsr01/msg/current_posx',  # 위치 및 자세 토픽
             self.position_rotation_callback,  # 콜백 함수
             10
@@ -21,38 +22,53 @@ class PositionRotationCalculator(Node):
         self.transformation_matrix = None
 
     def position_rotation_callback(self, msg):
-        # Extract data from message
-        x, y, z, rx, ry, rz = msg.data
+        self.get_logger().info("PositionRotationCalculator callback invoked!")
 
-        # Calculate rotation matrix from ZYZ Euler angles
-        R_matrix = self.euler_to_rotation_matrix(rx, ry, rz)
+        try:
+            # Extract data from message
+            x, y, z, rx, ry, rz = msg.data
 
-        # Construct transformation matrix
-        self.transformation_matrix = np.eye(4)
-        self.transformation_matrix[:3, :3] = R_matrix
-        self.transformation_matrix[:3, 3] = [x, y, z]
+            # Calculate rotation matrix using ZYZ Euler angles
+            R_matrix = self.rotation_matrix_from_rzyz(rx, ry, rz)
 
-        self.get_logger().info(f"Transformation Matrix (Base -> End Effector):\n{self.transformation_matrix}")
+            # Construct transformation matrix
+            self.transformation_matrix = np.eye(4)
+            self.transformation_matrix[:3, :3] = R_matrix
+            self.transformation_matrix[:3, 3] = [x, y, z]
 
-    def euler_to_rotation_matrix(self, rx, ry, rz):
-        # Convert ZYZ Euler Angles (degrees) to Rotation Matrix
-        rx, ry, rz = np.deg2rad([rx, ry, rz])  # Convert to radians
-        Rz1 = np.array([
+            self.get_logger().info(f"Transformation Matrix (Base -> End Effector):\n{self.transformation_matrix}")
+        except Exception as e:
+            self.get_logger().error(f"Error processing message: {e}")
+
+    def rotation_matrix_from_rzyz(self, rx, ry, rz):
+        # Convert degrees to radians
+        rx, ry, rz = np.deg2rad([rx, ry, rz])
+
+        # Create rotation matrices for ZYZ order
+        R_z1 = np.array([
             [np.cos(rz), -np.sin(rz), 0],
-            [np.sin(rz),  np.cos(rz), 0],
+            [np.sin(rz), np.cos(rz), 0],
             [0, 0, 1]
         ])
-        Ry = np.array([
+
+        R_y = np.array([
             [np.cos(ry), 0, np.sin(ry)],
             [0, 1, 0],
             [-np.sin(ry), 0, np.cos(ry)]
         ])
-        Rz2 = np.array([
+
+        R_z2 = np.array([
             [np.cos(rx), -np.sin(rx), 0],
-            [np.sin(rx),  np.cos(rx), 0],
+            [np.sin(rx), np.cos(rx), 0],
             [0, 0, 1]
         ])
-        return Rz1 @ Ry @ Rz2
+
+        # Combine rotations (ZYZ order)
+        R_matrix = np.dot(R_z1, np.dot(R_y, R_z2))
+        return R_matrix
+
+    def get_transform_matrix(self):
+        return self.transformation_matrix
 
 
 class HandEyeCalibration(Node):
@@ -76,11 +92,11 @@ class HandEyeCalibration(Node):
         object_points = np.zeros((7 * 9, 3), dtype=np.float32)
         object_points[:, :2] = np.mgrid[0:7, 0:9].T.reshape(-1, 2) * 20
         camera_matrix = np.array([
-            [756.79624248, 0, 300.79559778],
-            [0, 758.18809564, 283.84914722],
-            [0, 0, 1]
+            [744.58805716,   0.      ,   346.66750372],
+            [  0.         , 745.78693653, 280.83647637],
+            [  0.         ,  0.         ,  1.        ]
         ], dtype=np.float64)
-        dist_coeffs = np.array([-0.41748243, 0.2726393, 0.00340657, 0.00165751, -0.39339633])
+        dist_coeffs = np.array([-0.43147739,  0.23392883,  0.00118724, -0.00219554, -0.0411546])
 
         cap = cv2.VideoCapture(0)
         if not cap.isOpened():
@@ -112,7 +128,7 @@ class HandEyeCalibration(Node):
                         
                         cv2.imshow("Detected Chessboard", frame)
                         cv2.waitKey(0)  # 사용자 확인 후 아무 키나 눌러 닫기
-                        
+
                         cap.release()
                         cv2.destroyAllWindows()
                         return True, T_cam_to_marker
@@ -150,7 +166,6 @@ def main():
     rclpy.init()
     position_rotation_calculator = PositionRotationCalculator()
     hand_eye_calibration = HandEyeCalibration(position_rotation_calculator)
-
     try:
         for _ in range(10):
             hand_eye_calibration.capture_pose()

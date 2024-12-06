@@ -4,77 +4,87 @@ import torch
 from torchvision.transforms import functional as F
 from torchvision.models.detection import fasterrcnn_mobilenet_v3_large_320_fpn
 from rclpy.node import Node
-from scipy.spatial.transform import Rotation as R
-from tf2_msgs.msg import TFMessage
+from std_msgs.msg import Float64MultiArray
+import tf_transformations
 import rclpy
 
 
-# Object Detection ?? ??
+# Object Detection Model Initialization
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = fasterrcnn_mobilenet_v3_large_320_fpn(pretrained=True).to(device)
 model.eval()
 
 
-class TFChainCalculator(Node):
+class PositionRotationCalculator(Node):
     def __init__(self):
-        super().__init__('tf_chain_calculator')
-        self.subscriber = self.create_subscription(
-            TFMessage,
-            '/tf',
-            self.tf_callback,
+        super().__init__('position_rotation_calculator')
+
+        # Subscribe to position and rotation topics
+        self.create_subscription(
+            Float64MultiArray,  # 메시지 타입
+            '/dsr01/msg/current_posx',  # 위치 및 자세 토픽
+            self.position_rotation_callback,  # 콜백 함수
             10
         )
-        self.transforms = {}
-        self.target_frame = 'link_6'
-        self.base_frame = 'base_link'
 
-    def tf_callback(self, msg):
-        for transform in msg.transforms:
-            parent_frame = transform.header.frame_id
-            child_frame = transform.child_frame_id
-            self.transforms[(parent_frame, child_frame)] = transform.transform
+        self.transformation_matrix = None
 
-    def get_transform_matrix(self, base_frame, target_frame):
-        current_frame = target_frame
-        chain = []
+    def position_rotation_callback(self, msg):
+        self.get_logger().info("PositionRotationCalculator callback invoked!")
 
-        while current_frame != base_frame:
-            for (parent, child), transform in self.transforms.items():
-                if child == current_frame:
-                    chain.append((parent, child, transform))
-                    current_frame = parent
-                    break
-            else:
-                self.get_logger().error(f"No parent frame found for {current_frame}")
-                return None
+        try:
+            # Extract data from message
+            x, y, z, rx, ry, rz = msg.data
 
-        transform_matrix = np.eye(4)
-        for parent, child, transform in reversed(chain):
-            translation = [
-                transform.translation.x * 1000,
-                transform.translation.y * 1000,
-                transform.translation.z * 1000
-            ]
-            quaternion = [
-                transform.rotation.x,
-                transform.rotation.y,
-                transform.rotation.z,
-                transform.rotation.w
-            ]
-            rotation_matrix = R.from_quat(quaternion).as_matrix()
-            T = np.eye(4)
-            T[:3, :3] = rotation_matrix
-            T[:3, 3] = translation
-            transform_matrix = transform_matrix @ T
+            # Calculate rotation matrix using ZYZ Euler angles
+            R_matrix = self.rotation_matrix_from_rzyz(rx, ry, rz)
 
-        return transform_matrix
+            # Construct transformation matrix
+            self.transformation_matrix = np.eye(4)
+            self.transformation_matrix[:3, :3] = R_matrix
+            self.transformation_matrix[:3, 3] = [x, y, z]
+
+            self.get_logger().info(f"Transformation Matrix (Base -> End Effector):\n{self.transformation_matrix}")
+        except Exception as e:
+            self.get_logger().error(f"Error processing message: {e}")
+
+    def rotation_matrix_from_rzyz(self, rx, ry, rz):
+        # Convert degrees to radians
+        rx, ry, rz = np.deg2rad([rx, ry, rz])
+
+        # Create rotation matrices for ZYZ order
+        R_z1 = np.array([
+            [np.cos(rz), -np.sin(rz), 0],
+            [np.sin(rz), np.cos(rz), 0],
+            [0, 0, 1]
+        ])
+
+        R_y = np.array([
+            [np.cos(ry), 0, np.sin(ry)],
+            [0, 1, 0],
+            [-np.sin(ry), 0, np.cos(ry)]
+        ])
+
+        R_z2 = np.array([
+            [np.cos(rx), -np.sin(rx), 0],
+            [np.sin(rx), np.cos(rx), 0],
+            [0, 0, 1]
+        ])
+
+        # Combine rotations (ZYZ order)
+        R_matrix = np.dot(R_z1, np.dot(R_y, R_z2))
+        return R_matrix
+
+    def get_transform_matrix(self):
+        return self.transformation_matrix
+
 
 
 class ObjectDetectionNode(Node):
-    def __init__(self, tf_calculator, T_eff_to_cam):
+    def __init__(self, position_rotation_calculator, T_eff_to_cam):
         super().__init__('object_detection_node')
         self.bridge = cv2.VideoCapture(0)  # Camera Index
-        self.tf_calculator = tf_calculator
+        self.position_rotation_calculator = position_rotation_calculator
         self.T_eff_to_cam = T_eff_to_cam
 
     def detect_and_transform(self):
@@ -94,44 +104,43 @@ class ObjectDetectionNode(Node):
             self.get_logger().info("No objects detected")
             return
 
-        # ?? ?? confidence? ?? ?? ??
+        # Get the most confident detection
         max_idx = torch.argmax(outputs["scores"])
         box = outputs["boxes"][max_idx].cpu().numpy()
-        # center_pixel = ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
         center_pixel = (int((box[0] + box[2]) / 2), int((box[1] + box[3]) / 2))
 
-
-        # Camera Intrinsics (?? ?)
+        # Camera Intrinsics
         camera_intrinsics = np.array([
-            [756.79624248, 0, 300.79559778],
-            [0, 758.18809564, 283.84914722],
-            [0, 0, 1]
-        ])
+            [744.58805716,   0.      ,   346.66750372],
+            [  0.         , 745.78693653, 280.83647637],
+            [  0.         ,  0.         ,  1.        ]
+        ], dtype=np.float64)
 
-        # ?? ?? -> ??? ?? ??
-        depth = 1000.0  # Assume depth in mm (replace with actual depth sensor data)
+        # Pixel to Camera Coordinates
+        depth = 400  # Assume depth in mm (replace with actual depth sensor data)
         uv = np.array([center_pixel[0], center_pixel[1], 1.0])
         camera_coords = np.linalg.inv(camera_intrinsics) @ (uv * depth)
         camera_coords_h = np.append(camera_coords, 1.0)  # Homogeneous coordinates
 
-        # ??? -> End-Effector ??
-        
-        
+        # Camera to End-Effector Coordinates
         eff_coords = np.linalg.inv(self.T_eff_to_cam) @ camera_coords_h
 
-        # End-Effector -> Base ??
-        rclpy.spin_once(self.tf_calculator)
-        T_base_to_eff = self.tf_calculator.get_transform_matrix('base_link', 'link_6')
+        # End-Effector to Base Coordinates
+        rclpy.spin_once(self.position_rotation_calculator)
+        T_base_to_eff = self.position_rotation_calculator.get_transform_matrix()
         if T_base_to_eff is None:
             self.get_logger().error("Could not compute T_base_to_eff")
             return
+        
+        self.get_logger().info(f"Base -> Eff: \n{T_base_to_eff}")
 
         base_coords = T_base_to_eff @ eff_coords
 
         self.get_logger().info(f"Object center in Base Frame: {base_coords[:3]}")
 
-        cv2.circle(frame, center_pixel, 5, (0, 0, 255), -1)  # ???? ?? ? ???
-        cv2.rectangle(frame, (int(box[0]), int(box[1])), (int(box[2]), int(box[3])), (0, 255, 0), 2)         
+        # Visualization
+        cv2.circle(frame, center_pixel, 5, (0, 0, 255), -1)
+        cv2.rectangle(frame, (int(box[0]), int(box[1])), (int(box[2]), int(box[3])), (0, 255, 0), 2)
         cv2.putText(frame, "Object", (center_pixel[0] - 20, center_pixel[1] - 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
 
@@ -146,33 +155,32 @@ class ObjectDetectionNode(Node):
 def main(args=None):
     rclpy.init(args=args)
 
-    # TFChainCalculator ??
-    tf_calculator = TFChainCalculator()
-    print("TF Calculator loaded")
-    # ?????? ?? (T_eff_to_cam)
-    T_eff_to_cam = np.array([
-        [9.16869125e-01, 3.98615102e-01, 2.13777375e-02, 9.05965902e+01],
-        [-3.82071021e-01, 8.60781334e-01, 3.36269579e-01, -5.37479709e+01],
-        [1.15640575e-01, -3.16483009e-01, 9.41523108e-01, 1.04760329e+02],
-        [0.0, 0.0, 0.0, 1.0]
-        ])
+    # PositionRotationCalculator 초기화
+    position_rotation_calculator = PositionRotationCalculator()
 
-    # Object Detection Node ??
-    detection_node = ObjectDetectionNode(tf_calculator, T_eff_to_cam)
+    # End-Effector → Camera Transform
+    T_eff_to_cam = np.array(
+[[ 9.36617093e-01,  3.17745660e-02,  3.48910873e-01,  7.04658814e+01],
+ [ 1.65273478e-01,  8.38037453e-01, -5.19978754e-01,  5.70715047e+01],
+ [-3.08922479e-01,  5.44686703e-01,  7.79668710e-01,  5.05987400e+02],
+ [ 0.00000000e+00,  0.00000000e+00,  0.00000000e+00,  1.00000000e+00]]
+
+
+)
+
+    # Object Detection Node 초기화
+    detection_node = ObjectDetectionNode(position_rotation_calculator, T_eff_to_cam)
 
     try:
-        print("spinnig detection node")
         while rclpy.ok():
-            print("detecting start")
             detection_node.detect_and_transform()
     except KeyboardInterrupt:
         pass
     finally:
         detection_node.destroy_node()
-        tf_calculator.destroy_node()
+        position_rotation_calculator.destroy_node()
         rclpy.shutdown()
 
 
 if __name__ == '__main__':
     main()
-
