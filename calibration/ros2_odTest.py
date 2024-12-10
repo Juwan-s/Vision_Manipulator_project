@@ -5,9 +5,9 @@ from torchvision.transforms import functional as F
 from torchvision.models.detection import fasterrcnn_mobilenet_v3_large_320_fpn
 from rclpy.node import Node
 from std_msgs.msg import Float64MultiArray
-import tf_transformations
 import rclpy
-
+from cv_bridge import CvBridge, CvBridgeError
+from sensor_msgs.msg import Image
 
 # Object Detection Model Initialization
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -23,9 +23,9 @@ class PositionRotationCalculator(Node):
 
         # Subscribe to position and rotation topics
         self.create_subscription(
-            Float64MultiArray,  # 메시지 타입
-            '/dsr01/msg/current_posx',  # 위치 및 자세 토픽
-            self.position_rotation_callback,  # 콜백 함수
+            Float64MultiArray,
+            '/dsr01/msg/current_posx',
+            self.position_rotation_callback,
             10
         )
 
@@ -54,7 +54,7 @@ class PositionRotationCalculator(Node):
         # Convert degrees to radians
         rx, ry, rz = np.deg2rad([rx, ry, rz])
 
-        # Create rotation matrices for ZYZ order
+        # Rotation matrices for ZYZ order
         R_z1 = np.array([
             [np.cos(rz), -np.sin(rz), 0],
             [np.sin(rz), np.cos(rz), 0],
@@ -73,7 +73,6 @@ class PositionRotationCalculator(Node):
             [0, 0, 1]
         ])
 
-        # Combine rotations (ZYZ order)
         R_matrix = np.dot(R_z1, np.dot(R_y, R_z2))
         return R_matrix
 
@@ -84,29 +83,60 @@ class PositionRotationCalculator(Node):
 class ObjectDetectionNode(Node):
     def __init__(self, position_rotation_calculator, T_eff_to_cam):
         super().__init__('object_detection_node')
-        self.bridge = cv2.VideoCapture(4)  # Camera Index
+        self.cv_bridge = CvBridge()
         self.position_rotation_calculator = position_rotation_calculator
         self.T_eff_to_cam = T_eff_to_cam
 
+        # Subscribe to color and depth image topics
+        self.color_sub = self.create_subscription(
+            Image,
+            '/camera/camera/color/image_raw',
+            self.color_callback,
+            10
+        )
+
+        self.depth_sub = self.create_subscription(
+            Image,
+            '/camera/camera/depth/image_rect_raw',
+            self.depth_callback,
+            10
+        )
+
+        self.color_image = None
+        self.depth_image = None
+
+        # 주기적으로 detect_and_transform를 호출하기 위한 타이머 설정
+        self.timer = self.create_timer(0.1, self.detect_and_transform)
+
+    def color_callback(self, msg):
+        try:
+            self.color_image = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+        except CvBridgeError as e:
+            self.get_logger().error(f"Color image conversion error: {e}")
+
+    def depth_callback(self, msg):
+        try:
+            self.depth_image = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
+        except CvBridgeError as e:
+            self.get_logger().error(f"Depth image conversion error: {e}")
+
     def detect_and_transform(self):
-        ret, frame = self.bridge.read()
-        if not ret:
-            self.get_logger().error("Could not read frame")
+        # color_image와 depth_image가 모두 준비되어 있어야 함
+        if self.color_image is None or self.depth_image is None:
             return
 
-        # Object Detection
+        frame = self.color_image.copy()
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         frame_tensor = F.to_tensor(frame_rgb).unsqueeze(0).to(device)
 
         with torch.no_grad():
             outputs = model(frame_tensor)[0]
 
-        # labels, boxes, scores
         labels = outputs["labels"].cpu().numpy()
         boxes = outputs["boxes"].cpu().numpy()
         scores = outputs["scores"].cpu().numpy()
 
-        # cup 클래스 필터링
+        # cup(47) 클래스만 필터링
         cup_indices = np.where(labels == CUP_CLASS_ID)[0]
         if len(cup_indices) == 0:
             self.get_logger().info("No cup detected")
@@ -115,24 +145,32 @@ class ObjectDetectionNode(Node):
                 rclpy.shutdown()
             return
 
-        # 가장 자신도가 높은 cup 하나만 사용
+        # 가장 자신도가 높은 cup 선택
         cup_scores = scores[cup_indices]
         max_cup_idx = cup_indices[np.argmax(cup_scores)]
 
         box = boxes[max_cup_idx]
         center_pixel = (int((box[0] + box[2]) / 2), int((box[1] + box[3]) / 2))
 
-        # Camera Intrinsics (사용자 환경에 맞는 Intrinsic 사용)
+        # depth 이미지에서 해당 픽셀의 깊이 값 추출
+        depth_value = self.depth_image[center_pixel[1], center_pixel[0]]
+        
+
+        # depth 값이 유효하지 않은 경우 처리
+        if depth_value == 0:
+            self.get_logger().warn("Invalid depth value at detected cup center.")
+            return
+
+        # Camera Intrinsics
         camera_intrinsics = np.array([
             [905.37653593,   0.        , 653.92759642],
             [  0.        , 903.06919   , 376.95680054],
             [  0.        ,   0.        ,   1.        ],
         ], dtype=np.float64)
 
-        # Pixel to Camera Coordinates
-        depth = 400  # Assume depth in mm (replace with actual depth sensor data)
         uv = np.array([center_pixel[0], center_pixel[1], 1.0])
-        camera_coords = np.linalg.inv(camera_intrinsics) @ (uv * depth)
+        # depth_value가 mm 단위라 가정
+        camera_coords = np.linalg.inv(camera_intrinsics) @ (uv * depth_value)
         camera_coords_h = np.append(camera_coords, 1.0)  # Homogeneous coordinates
 
         # Camera to End-Effector Coordinates
@@ -144,11 +182,10 @@ class ObjectDetectionNode(Node):
         if T_base_to_eff is None:
             self.get_logger().error("Could not compute T_base_to_eff")
             return
-        
+
         self.get_logger().info(f"Base -> Eff: \n{T_base_to_eff}")
 
         base_coords = T_base_to_eff @ eff_coords
-
         self.get_logger().info(f"Cup center in Base Frame: {base_coords[:3]}")
 
         # Visualization
@@ -162,7 +199,7 @@ class ObjectDetectionNode(Node):
             rclpy.shutdown()
 
     def __del__(self):
-        self.bridge.release()
+        cv2.destroyAllWindows()
 
 
 def main(args=None):
@@ -173,18 +210,20 @@ def main(args=None):
 
     # End-Effector → Camera Transform
     T_eff_to_cam = np.array(
-        [[ 8.27249618e-01, -2.29716623e-01, -5.12726382e-01,  2.26548780e+02],
-         [ 2.80572465e-01,  9.59562668e-01,  2.27723192e-02, -2.80346639e+02],
-         [ 4.86761915e-01, -1.62695297e-01,  8.58250009e-01,  2.51757560e+02],
-         [ 0.00000000e+00,  0.00000000e+00,  0.00000000e+00,  1.00000000e+00]]
+    [[ 8.27249618e-01, -2.29716623e-01, -5.12726382e-01,  2.26548780e+02],
+     [ 2.80572465e-01 , 9.59562668e-01,  2.27723192e-02, -2.80346639e+02],
+     [ 4.86761915e-01 ,-1.62695297e-01,  8.58250009e-01,  2.51757560e+02],
+     [ 0.00000000e+00 , 0.00000000e+00,  0.00000000e+00,  1.00000000e+00]]
     )
 
     # Object Detection Node 초기화
     detection_node = ObjectDetectionNode(position_rotation_calculator, T_eff_to_cam)
 
+    # ROS 스핀
     try:
         while rclpy.ok():
-            detection_node.detect_and_transform()
+            rclpy.spin_once(detection_node, timeout_sec=0.01)
+            cv2.waitKey(1)  # OpenCV 이벤트 처리
     except KeyboardInterrupt:
         pass
     finally:
