@@ -22,6 +22,7 @@ setup(
     entry_points={
         'console_scripts': [
             'object_detection_node = od_package.od_task:main',
+            'object_detection_center = od_package.od_center:main',
         ],
     },
 )

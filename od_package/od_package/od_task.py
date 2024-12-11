@@ -2,7 +2,7 @@ import cv2
 import torch
 from torchvision.transforms import functional as F
 from torchvision.ops import nms
-from torchvision.models.detection import ssd300_vgg16, retinanet_resnet50_fpn_v2, fasterrcnn_resnet50_fpn, fasterrcnn_mobilenet_v3_large_320_fpn
+from torchvision.models.detection import fasterrcnn_mobilenet_v3_large_320_fpn
 from sensor_msgs.msg import Image
 from std_msgs.msg import Header
 from cv_bridge import CvBridge
@@ -13,7 +13,6 @@ import json
 
 from ament_index_python.packages import get_package_share_directory
 import os
-
 
 # JSON 파일 경로 설정
 package_share_directory = get_package_share_directory('od_package')
@@ -68,16 +67,17 @@ class ObjectDetectionNode(Node):
         super().__init__('object_detection_node')
         self.publisher_ = self.create_publisher(Image, 'detected_objects_image', 10)
         self.bridge = CvBridge()
-        self.timer = self.create_timer(0.1, self.detect_and_publish)
-        self.cap = cv2.VideoCapture(4)  # Change camera index if needed
-        if not self.cap.isOpened():
-            self.get_logger().error("Could not open the webcam")
+        self.subscription = self.create_subscription(
+            Image,
+            '/camera/camera/color/image_raw',
+            self.image_callback,
+            10
+        )
+        self.subscription  # prevent unused variable warning
 
-    def detect_and_publish(self):
-        ret, frame = self.cap.read()
-        if not ret:
-            self.get_logger().error("Could not read frame")
-            return
+    def image_callback(self, msg):
+        # Convert ROS Image message to OpenCV image
+        frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
 
         # Convert BGR to RGB for PyTorch
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -105,9 +105,6 @@ class ObjectDetectionNode(Node):
             cv2.putText(frame, score_text, (box[0], box[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
         return frame
-
-    def __del__(self):
-        self.cap.release()
 
 def main(args=None):
     rclpy.init(args=args)
