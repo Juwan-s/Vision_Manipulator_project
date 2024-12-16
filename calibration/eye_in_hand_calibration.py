@@ -6,23 +6,27 @@ from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import Float64MultiArray
 from cv_bridge import CvBridge
 
+import json
+
+calibration_param = './calib_param.json'
+
+# JSON 파일 읽기
+with open(calibration_param) as f:
+    calib_param = json.load(f)
+
+fx = float(calib_param['rectified.2.fx'])
+fy = float(calib_param['rectified.2.fy'])
+ppx = float(calib_param['rectified.2.ppx'])
+ppy = float(calib_param['rectified.2.ppy'])
+
 class HandEyeCalibration(Node):
     def __init__(self):
         super().__init__('hand_eye_calibration')
 
-        # Subscribe to Base -> EFF transformation matrix
         self.create_subscription(
             Float64MultiArray,
-            '/base_to_eff_matrix',
-            self.base_to_eff_callback,
-            10
-        )
-
-        # Subscribe to RealSense Camera Info
-        self.create_subscription(
-            CameraInfo,
-            '/camera/camera/color/camera_info',
-            self.camera_info_callback,
+            '/dsr01/msg/current_posx',
+            self.position_rotation_callback,
             10
         )
 
@@ -33,6 +37,14 @@ class HandEyeCalibration(Node):
             self.image_callback,
             10
         )
+
+        self.camera_matrix = np.array([
+            [fx,     0,        ppx],
+            [0,      fy,       ppy],
+            [0,      0,          1]
+        ])
+
+        self.dist_coeffs = np.zeros(5)
         
         self.solve_pnp_counter = 0
         
@@ -41,37 +53,62 @@ class HandEyeCalibration(Node):
         self.A_matrices = []  # Base to EFF matrices
         self.B_matrices = []  # Camera to Marker matrices
 
-        self.camera_matrix = None
-        self.dist_coeffs = None
+        # self.camera_matrix = None
+        # self.dist_coeffs = None
         self.camera_info_received = False  # Flag to check if CameraInfo is received
 
         self.bridge = CvBridge()
         self.current_frame = None
         self.c_pressed = False
 
-    def base_to_eff_callback(self, msg):
+    def rotation_matrix_from_rzyz(self, rx, ry, rz):
+        # Convert degrees to radians
+        rx, ry, rz = np.deg2rad([rx, ry, rz])
+
+        R_z1 = np.array([
+            [np.cos(rz), -np.sin(rz), 0],
+            [np.sin(rz),  np.cos(rz), 0],
+            [0,           0,          1]
+        ])
+
+        R_y = np.array([
+            [np.cos(ry), 0, np.sin(ry)],
+            [0,          1, 0        ],
+            [-np.sin(ry),0, np.cos(ry)]
+        ])
+
+        R_z2 = np.array([
+            [np.cos(rx), -np.sin(rx), 0],
+            [np.sin(rx),  np.cos(rx), 0],
+            [0,           0,          1]
+        ])
+
+        R_matrix = R_z1 @ R_y @ R_z2
+        return R_matrix
+
+    def position_rotation_callback(self, msg):
+        self.get_logger().info("PositionRotationCalculator callback invoked!")
         try:
-            T_base_to_eff = np.array(msg.data).reshape((4, 4))
-            # if self.current_T_base_to_eff is None:
+            x, y, z, rx, ry, rz = msg.data
+            R_matrix = self.rotation_matrix_from_rzyz(rx, ry, rz)
+            self.current_T_base_to_eff = np.eye(4)
+            self.current_T_base_to_eff[:3, :3] = R_matrix
+            self.current_T_base_to_eff[:3, 3] = [x, y, z]
+
             self.get_logger().info(f"T_base_to_eff is setted")
-            self.current_T_base_to_eff = T_base_to_eff
-                
         except Exception as e:
             self.get_logger().error(f"Error processing Base -> EFF matrix: {e}")
 
-    def camera_info_callback(self, msg):
-    
-        try:
-            # Extract camera matrix and distortion coefficients
-            self.camera_matrix = np.array(msg.k).reshape((3, 3))
-            self.dist_coeffs = np.array(msg.d)
-            self.get_logger().info(f"Camera Intrinsic setted")
-            if not self.camera_info_received:
-                self.camera_info_received = True
-                self.get_logger().info(f"Camera Matrix:\n{self.camera_matrix}")
-                self.get_logger().info(f"Distortion Coefficients:\n{self.dist_coeffs}")
-        except Exception as e:
-            self.get_logger().error(f"Error processing CameraInfo: {e}")
+    # def base_to_eff_callback(self, msg):
+    #     try:
+    #         T_base_to_eff = np.array(msg.data).reshape((4, 4))
+    #         # if self.current_T_base_to_eff is None:
+    #         self.get_logger().info(f"T_base_to_eff is setted")
+    #         self.current_T_base_to_eff = T_base_to_eff
+                
+    #     except Exception as e:
+    #         self.get_logger().error(f"Error processing Base -> EFF matrix: {e}")
+
 
     def image_callback(self, msg):
         # Convert ROS Image message to OpenCV image
@@ -106,12 +143,10 @@ class HandEyeCalibration(Node):
                 self.get_logger().info("'c' pressed. Attempting to detect chessboard.")
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 ret, corners = cv2.findChessboardCorners(gray, (7, 9), None)
-                
-           
     
                 if ret:
                     object_points = np.zeros((7 * 9, 3), dtype=np.float32)
-                    object_points[:, :2] = np.mgrid[0:7, 0:9].T.reshape(-1, 2) * 20
+                    object_points[:, :2] = np.mgrid[0:7, 0:9].T.reshape(-1, 2) * 0.020
     
                     success, rvec, tvec = cv2.solvePnP(object_points, corners, self.camera_matrix, self.dist_coeffs)
                     
@@ -132,7 +167,7 @@ class HandEyeCalibration(Node):
                         T_cam_to_marker[:3, :3] = rotation_matrix
                         T_cam_to_marker[:3, 3] = tvec.flatten()
     
-                        frame = self.draw_axes(frame, self.camera_matrix, self.dist_coeffs, rvec, tvec, scale=100)
+                        frame = self.draw_axes(frame, self.camera_matrix, self.dist_coeffs, rvec, tvec, scale=0.1)
                         cv2.drawChessboardCorners(frame, (7, 9), corners, ret)
     
                         for idx, corner in enumerate(corners):
@@ -155,11 +190,14 @@ class HandEyeCalibration(Node):
                         
                         self.B_matrices.append(T_cam_to_marker)
                         self.A_matrices.append(self.current_T_base_to_eff)
+
+                        self.get_logger().info(f"A matrices length : {len(self.A_matrices)}")
+                        self.get_logger().info(f"B matrices length : {len(self.B_matrices)}")
                         
                         self.get_logger().info(f"Captured Camera -> Marker Matrix:\n{T_cam_to_marker}")
     
                         self.solve_pnp_counter += 1
-                        if self.solve_pnp_counter == 10:
+                        if self.solve_pnp_counter == 20:
                             break
                     else:
                         self.get_logger().error("solvePnP failed.")
@@ -169,7 +207,7 @@ class HandEyeCalibration(Node):
         return
 
     
-    def draw_axes(self, image, camera_matrix, dist_coeffs, rvec, tvec, scale=50):
+    def draw_axes(self, image, camera_matrix, dist_coeffs, rvec, tvec, scale=5):
         """
         Draw XYZ axes on the image.
         :param image: The input image to draw on.
@@ -212,7 +250,7 @@ class HandEyeCalibration(Node):
             t_gripper2base=A_translations,
             R_target2cam=B_rotations,
             t_target2cam=B_translations,
-            method=cv2.CALIB_HAND_EYE_TSAI
+            method=cv2.CALIB_HAND_EYE_PARK
         )
 
         T_eff_to_cam = np.eye(4)
@@ -234,11 +272,11 @@ def main():
         or hand_eye_calibration.camera_matrix is None \
         or hand_eye_calibration.dist_coeffs is None \
         or hand_eye_calibration.current_frame is None:
-            
-            # print(f"hand_eye_calibration.current_T_base_to_eff is {(hand_eye_calibration.current_T_base_to_eff is None)}")
-            # print(f"hand_eye_calibration.camera_matrix is {(hand_eye_calibration.camera_matrix is None)}")
-            # print(f"hand_eye_calibration.dist_coeffs is {(hand_eye_calibration.dist_coeffs is None)}")
-            # print(f"hand_eye_calibration.current_frame is {(hand_eye_calibration.current_frame is None)}")
+    
+            print(f"hand_eye_calibration.current_T_base_to_eff is {(hand_eye_calibration.current_T_base_to_eff is None)}")
+            print(f"hand_eye_calibration.camera_matrix is {(hand_eye_calibration.camera_matrix is None)}")
+            print(f"hand_eye_calibration.dist_coeffs is {(hand_eye_calibration.dist_coeffs is None)}")
+            print(f"hand_eye_calibration.current_frame is {(hand_eye_calibration.current_frame is None)}")
             
             
             rclpy.spin_once(hand_eye_calibration)

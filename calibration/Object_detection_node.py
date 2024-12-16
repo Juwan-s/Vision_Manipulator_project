@@ -11,6 +11,22 @@ import numpy as np
 # Load YOLOv8 model
 model = YOLO("yolov8n.pt")  # Use YOLOv8n model for object detection
 
+
+
+import json
+
+calibration_param = './calib_param.json'
+
+# JSON 파일 읽기
+with open(calibration_param) as f:
+    calib_param = json.load(f)
+
+fx = float(calib_param['rectified.2.fx'])
+fy = float(calib_param['rectified.2.fy'])
+ppx = float(calib_param['rectified.2.ppx'])
+ppy = float(calib_param['rectified.2.ppy'])
+
+
 # ROS 2 Node for Object Detection with Depth
 class ObjectDetectionNode(Node):
     def __init__(self):
@@ -37,21 +53,29 @@ class ObjectDetectionNode(Node):
             self.depth_callback,
             10
         )
-        self.camera_info_subscription = self.create_subscription(
-            CameraInfo,
-            '/camera/camera/color/camera_info',
-            self.camera_info_callback,
-            10
-        )
+        # self.camera_info_subscription = self.create_subscription(
+        #     CameraInfo,
+        #     '/camera/camera/color/camera_info',
+        #     self.camera_info_callback,
+        #     10
+        # )
 
         self.color_frame = None
         self.depth_frame = None
-        self.intrinsics = None
+        # self.intrinsics = None
+        self.intrinsics = {
+            "fx": fx,
+            "fy": fy,
+            "ppx": ppx,
+            "ppy": ppy
+        }
+
+        self.dist_coeffs = np.zeros(5)
         
         self.T_eff_to_cam = np.array(
-[[-5.29621954e-01,  3.50601354e-01, -7.72385445e-01,  3.09028722e+02],
- [ 5.33484248e-01,  8.45617707e-01,  1.80347044e-02,  1.79618245e+01],
- [ 6.59465801e-01, -4.02503893e-01, -6.34898002e-01,  6.77169843e+02],
+[[ 9.98072514e-01, -7.24980449e-03,  6.16335640e-02, -5.89283639e+01],
+ [ 5.70035066e-02,  4.99709433e-01, -8.64315384e-01, -1.41082031e+01],
+ [-2.45327558e-02,  8.66162758e-01,  4.99159515e-01,  4.80191386e+02],
  [ 0.00000000e+00,  0.00000000e+00,  0.00000000e+00,  1.00000000e+00]]
 
             )   
@@ -61,14 +85,14 @@ class ObjectDetectionNode(Node):
         mat = np.array(msg.data).reshape(4,4)
         self.T_base_to_eff = mat
 
-    def camera_info_callback(self, msg):
-        # Extract camera intrinsics
-        self.intrinsics = {
-            "fx": msg.k[0],
-            "fy": msg.k[4],
-            "ppx": msg.k[2],
-            "ppy": msg.k[5]
-        }
+    # def camera_info_callback(self, msg):
+    #     # Extract camera intrinsics
+    #     self.intrinsics = {
+    #         "fx": msg.k[0],
+    #         "fy": msg.k[4],
+    #         "ppx": msg.k[2],
+    #         "ppy": msg.k[5]
+    #     }
 
     def color_callback(self, msg):
         self.color_frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
